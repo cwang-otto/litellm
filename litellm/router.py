@@ -128,6 +128,7 @@ from litellm.router_utils.cooldown_handlers import (
 )
 from litellm.router_utils.fallback_event_handlers import (
     _check_non_standard_fallback_format,
+    build_mid_stream_continuation_messages,
     get_fallback_model_group,
     run_async_fallback,
 )
@@ -2091,17 +2092,15 @@ class Router:
                         # would waste tokens and confuse the model.
                         initial_kwargs["messages"] = messages
                     else:
-                        initial_kwargs["messages"] = messages + [
-                            {
-                                "role": "system",
-                                "content": "You are a helpful assistant. You are given a message and you need to respond to it. You are also given a generated content. You need to respond to the message in continuation of the generated content. Do not repeat the same content. Your response should be in continuation of this text: ",
-                            },
-                            {
-                                "role": "assistant",
-                                "content": e.generated_content,
-                                "prefix": True,
-                            },
-                        ]
+                        # Models that reject assistant prefill (Claude Sonnet 4.6 /
+                        # Opus 4.6) get a USER-message continuation instead of the
+                        # legacy prefilled-assistant message, which would 400.
+                        initial_kwargs["messages"] = build_mid_stream_continuation_messages(
+                            messages=messages,
+                            generated_content=e.generated_content,
+                            model_group=model_group,
+                            fallbacks=fallbacks,
+                        )
                     self._update_kwargs_before_fallbacks(model=model_group, kwargs=initial_kwargs)
                     fallback_response = await self.async_function_with_fallbacks_common_utils(
                         e=e,
@@ -2658,17 +2657,15 @@ class Router:
                     if e.is_pre_first_chunk or not e.generated_content:
                         initial_kwargs["messages"] = messages
                     else:
-                        initial_kwargs["messages"] = messages + [
-                            {
-                                "role": "system",
-                                "content": "You are a helpful assistant. You are given a message and you need to respond to it. You are also given a generated content. You need to respond to the message in continuation of the generated content. Do not repeat the same content. Your response should be in continuation of this text: ",
-                            },
-                            {
-                                "role": "assistant",
-                                "content": e.generated_content,
-                                "prefix": True,
-                            },
-                        ]
+                        # Models that reject assistant prefill (Claude Sonnet 4.6 /
+                        # Opus 4.6) get a USER-message continuation instead of the
+                        # legacy prefilled-assistant message, which would 400.
+                        initial_kwargs["messages"] = build_mid_stream_continuation_messages(
+                            messages=messages,
+                            generated_content=e.generated_content,
+                            model_group=model_group,
+                            fallbacks=fallbacks,
+                        )
                     router_self._update_kwargs_before_fallbacks(model=model_group, kwargs=initial_kwargs)
                     fallback_response = router_self.function_with_fallbacks(
                         **initial_kwargs,
