@@ -1,5 +1,6 @@
 import time
 import uuid
+from datetime import datetime
 from typing import Any, cast
 
 import litellm
@@ -69,14 +70,38 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         self.custom_llm_provider: str | None = custom_llm_provider
         self.litellm_metadata: dict | None = litellm_metadata or {}
         # This __init__ deliberately does NOT call super().__init__() — the base
-        # class takes an httpx.Response the bridge never has. That means every
-        # base-class field must be re-declared here, and `completed_response` is
-        # the one external code reads off any BaseResponsesAPIStreamingIterator
-        # (Router._extract_partial_responses_usage on a mid-stream fallback, the
-        # proxy's container-ownership hook). Omitting it raised AttributeError
-        # from inside the `except MidStreamFallbackError` handler, which killed
-        # the fallback it was trying to account for.
+        # class takes an httpx.Response the bridge never has. Callers still treat
+        # this as a BaseResponsesAPIStreamingIterator, so every base-class field
+        # is re-declared below. Declaring them piecemeal has failed twice in
+        # production: a missing `completed_response` made
+        # Router._extract_partial_responses_usage raise from inside the
+        # `except MidStreamFallbackError` handler, killing the fallback it was
+        # accounting for; a missing `_hidden_params` made
+        # prepare_response_for_header_attachment swap this object for a
+        # HiddenParamsAsyncIteratorWrapper, changing the type callers assert on.
+        # test_bridge_iterator_matches_base_field_set pins the whole set so the
+        # next base-class field addition fails a test instead of a request.
+        self.response = cast(Any, None)  # no httpx.Response on the bridge path
+        self.logging_obj = litellm_custom_stream_wrapper.logging_obj
+        self.responses_api_provider_config = None
         self.completed_response: Any | None = None
+        self.start_time = getattr(litellm_custom_stream_wrapper.logging_obj, "start_time", datetime.now())
+        self._failure_handled = False
+        self._yielded_first_chunk = False
+        self._generated_content = ""
+        self._completed_response_cached = False
+        self._completed_response_logged = False
+        self._completed_response_cache_hit: bool | None = None
+        self._persist_completed_response_before_logging = True
+        self._stream_created_time: float = time.time()
+        self.request_data: dict[str, Any] = {}
+        self.call_type: str | None = None
+        # Starts empty rather than mirroring the base's model_id/api_base
+        # derivation: that reads self.response.headers, which does not exist
+        # here. An empty dict matches what HiddenParamsAsyncIteratorWrapper
+        # provided before, so header attachment behaves as it did — minus the
+        # type swap. ensure_response_additional_headers fills in the rest.
+        self._hidden_params: dict[str, Any] = {}
         # Store lightweight dict snapshots for stream_chunk_builder to reduce
         # repeated Pydantic attribute access in end-of-stream assembly.
         self.collected_chat_completion_chunks: list[dict[str, Any]] = []

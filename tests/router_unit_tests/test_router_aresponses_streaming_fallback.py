@@ -126,6 +126,46 @@ def test_bridge_iterator_declares_completed_response():
     assert iterator.completed_response is None
 
 
+def test_bridge_iterator_matches_base_field_set():
+    """
+    The bridge iterator does not call super().__init__() (the base wants an
+    httpx.Response it never has), yet callers treat it as a
+    BaseResponsesAPIStreamingIterator and read base fields off it. Pin the whole
+    field set: declaring them one incident at a time has already shipped two
+    production failures (completed_response -> AttributeError inside the
+    except MidStreamFallbackError handler, killing the fallback;
+    _hidden_params -> prepare_response_for_header_attachment swapped the object
+    for a HiddenParamsAsyncIteratorWrapper, changing the asserted type).
+
+    Parsing the base __init__ rather than instantiating it keeps this honest
+    without fabricating an httpx.Response: any field a future base class adds
+    fails here instead of at request time.
+    """
+    import re
+    from pathlib import Path
+
+    from litellm.responses import streaming_iterator as base_module
+    from litellm.responses.litellm_completion_transformation.streaming_iterator import (
+        LiteLLMCompletionStreamingIterator,
+    )
+
+    base_src = Path(base_module.__file__).read_text()
+    base_init = base_src.split("class BaseResponsesAPIStreamingIterator")[1]
+    base_init = base_init.split("def __init__")[1].split("\n    def ")[0]
+    base_fields = set(re.findall(r"self\.(\w+)\s*[:=]", base_init))
+    assert "completed_response" in base_fields, "base __init__ parse looks wrong"
+
+    bridge = LiteLLMCompletionStreamingIterator(
+        model="claude-sonnet-4-6",
+        litellm_custom_stream_wrapper=MagicMock(),
+        request_input="hello",
+        responses_api_request={},
+    )
+
+    missing = sorted(base_fields - set(vars(bridge)))
+    assert not missing, f"bridge iterator is missing base-class fields: {missing}"
+
+
 def test_extract_partial_responses_usage_bridge_no_chunks_yet():
     """
     Bridge path with nothing accumulated (mid-stream error on the very first
