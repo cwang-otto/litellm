@@ -90,6 +90,63 @@ def test_extract_partial_responses_usage_no_completed_response():
     assert usage is None
 
 
+def test_extract_partial_responses_usage_iterator_missing_the_attribute():
+    """
+    Iterator that never declares completed_response → None, not AttributeError.
+
+    Distinct from the test above, which covers the attribute being *present and
+    None*. A MagicMock cannot express "attribute absent" — it fabricates any
+    attribute read — so only a real object exercises this, and the bridge
+    iterator is exactly such an object (it skips super().__init__()).
+    """
+
+    class _NoCompletedResponse:
+        pass
+
+    assert Router._extract_partial_responses_usage(_NoCompletedResponse()) is None
+
+
+def test_bridge_iterator_declares_completed_response():
+    """
+    LiteLLMCompletionStreamingIterator must declare completed_response even
+    though it does not call super().__init__() — Router and the proxy's
+    container-ownership hook both read it off any streaming iterator.
+    """
+    from litellm.responses.litellm_completion_transformation.streaming_iterator import (
+        LiteLLMCompletionStreamingIterator,
+    )
+
+    iterator = LiteLLMCompletionStreamingIterator(
+        model="claude-sonnet-4-6",
+        litellm_custom_stream_wrapper=MagicMock(),
+        request_input="hello",
+        responses_api_request={},
+    )
+
+    assert iterator.completed_response is None
+
+
+def test_extract_partial_responses_usage_bridge_no_chunks_yet():
+    """
+    Bridge path with nothing accumulated (mid-stream error on the very first
+    chunk, e.g. Anthropic 'Overloaded') falls through to the native branch and
+    returns None instead of raising.
+    """
+    from litellm.responses.litellm_completion_transformation.streaming_iterator import (
+        LiteLLMCompletionStreamingIterator,
+    )
+
+    iterator = LiteLLMCompletionStreamingIterator(
+        model="claude-sonnet-4-6",
+        litellm_custom_stream_wrapper=MagicMock(),
+        request_input="hello",
+        responses_api_request={},
+    )
+    assert iterator.collected_chat_completion_chunks == []
+
+    assert Router._extract_partial_responses_usage(iterator) is None
+
+
 # -------- _combine_responses_fallback_usage --------
 
 
@@ -483,3 +540,132 @@ async def test_aresponses_client_error_event_skips_fallback():
 
     assert exc_info.value.status_code == 400
     mock_fallback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_aresponses_fallback_survives_source_without_completed_response():
+    """
+    Regression: a source iterator that never declared completed_response (the
+    litellm-completion bridge, which skips super().__init__()) used to abort the
+    mid-stream fallback with AttributeError raised from inside the
+    `except MidStreamFallbackError` handler — the failover never ran and callers
+    saw an opaque error instead of the fallback stream.
+
+    Reproduces the pre-first-chunk shape (Anthropic 'Overloaded' arriving before
+    any content), where the bridge has no accumulated chunks and the helper falls
+    through to the native branch.
+    """
+    from litellm.exceptions import MidStreamFallbackError
+
+    class _NoCompletedResponseSource:
+        """No completed_response attribute — deliberately not a MagicMock."""
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise MidStreamFallbackError(
+                message="Overloaded",
+                model="claude-sonnet-4-6",
+                llm_provider="anthropic",
+                generated_content="",
+                is_pre_first_chunk=True,
+            )
+
+    assert not hasattr(_NoCompletedResponseSource(), "completed_response")
+
+    fallback_event = _make_completed_event(2, 3, 5)
+
+    class _FallbackStream:
+        def __init__(self) -> None:
+            self._done = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._done:
+                raise StopAsyncIteration
+            self._done = True
+            return fallback_event
+
+    router = _make_router()
+    with patch.object(
+        router,
+        "async_function_with_fallbacks_common_utils",
+        new=AsyncMock(return_value=_FallbackStream()),
+    ) as mock_fallback:
+        wrapped = await router._aresponses_streaming_iterator(
+            response=_NoCompletedResponseSource(),
+            initial_kwargs={"model": "primary", "input": "original question"},
+        )
+        collected = [ev async for ev in wrapped]
+
+    assert collected == [fallback_event]
+    mock_fallback.assert_awaited_once()
+    # Pre-first-chunk → retry with the original input, no continuation prompt.
+    assert mock_fallback.await_args.kwargs["kwargs"]["input"] == "original question"
+
+
+@pytest.mark.asyncio
+async def test_aresponses_fallback_survives_usage_extraction_failure():
+    """
+    Partial-usage extraction is best-effort accounting; whatever it raises must
+    not replace the failover with an error. Fallback still runs, just without
+    partial usage merged in.
+    """
+    from litellm.exceptions import MidStreamFallbackError
+
+    class _Source:
+        completed_response = None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise MidStreamFallbackError(
+                message="Overloaded",
+                model="claude-sonnet-4-6",
+                llm_provider="anthropic",
+                generated_content="",
+                is_pre_first_chunk=True,
+            )
+
+    fallback_event = _make_completed_event(4, 6, 10)
+
+    class _FallbackStream:
+        def __init__(self) -> None:
+            self._done = False
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            if self._done:
+                raise StopAsyncIteration
+            self._done = True
+            return fallback_event
+
+    router = _make_router()
+    with (
+        patch.object(
+            Router,
+            "_extract_partial_responses_usage",
+            side_effect=RuntimeError("accounting blew up"),
+        ),
+        patch.object(
+            router,
+            "async_function_with_fallbacks_common_utils",
+            new=AsyncMock(return_value=_FallbackStream()),
+        ) as mock_fallback,
+    ):
+        wrapped = await router._aresponses_streaming_iterator(
+            response=_Source(),
+            initial_kwargs={"model": "primary", "input": "original question"},
+        )
+        collected = [ev async for ev in wrapped]
+
+    assert collected == [fallback_event]
+    mock_fallback.assert_awaited_once()
+    # Usage untouched: extraction failed, so nothing was merged into the event.
+    assert collected[0].response.usage.total_tokens == 10

@@ -68,6 +68,15 @@ class LiteLLMCompletionStreamingIterator(ResponsesAPIStreamingIterator):
         self.responses_api_request: ResponsesAPIOptionalRequestParams = responses_api_request
         self.custom_llm_provider: str | None = custom_llm_provider
         self.litellm_metadata: dict | None = litellm_metadata or {}
+        # This __init__ deliberately does NOT call super().__init__() — the base
+        # class takes an httpx.Response the bridge never has. That means every
+        # base-class field must be re-declared here, and `completed_response` is
+        # the one external code reads off any BaseResponsesAPIStreamingIterator
+        # (Router._extract_partial_responses_usage on a mid-stream fallback, the
+        # proxy's container-ownership hook). Omitting it raised AttributeError
+        # from inside the `except MidStreamFallbackError` handler, which killed
+        # the fallback it was trying to account for.
+        self.completed_response: Any | None = None
         # Store lightweight dict snapshots for stream_chunk_builder to reduce
         # repeated Pydantic attribute access in end-of-stream assembly.
         self.collected_chat_completion_chunks: list[dict[str, Any]] = []

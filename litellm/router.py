@@ -2234,7 +2234,12 @@ class Router:
         # Native path: completed_response is set only if RESPONSE_COMPLETED
         # arrived before the error (uncommon mid-stream but worth checking).
         # Already ResponseAPIUsage-shaped — return as-is.
-        completed = source_iterator.completed_response
+        # getattr-with-default, not attribute access: subclasses that skip
+        # super().__init__() (the bridge iterator does — the base wants an
+        # httpx.Response it never has) never declare the field, and an
+        # AttributeError here aborts the mid-stream fallback this usage is
+        # merely being accounted for.
+        completed = getattr(source_iterator, "completed_response", None)
         if isinstance(
             completed,
             (ResponseCompletedEvent, ResponseFailedEvent, ResponseIncompleteEvent),
@@ -2494,7 +2499,17 @@ class Router:
                 async for item in source_iterator:
                     yield item
             except MidStreamFallbackError as e:
-                partial_usage = Router._extract_partial_responses_usage(source_iterator)
+                # Token accounting must never be able to abort the failover it
+                # is accounting for: anything raised here would replace the
+                # fallback below with an opaque error and strand the request.
+                try:
+                    partial_usage = Router._extract_partial_responses_usage(source_iterator)
+                except Exception as usage_exc:
+                    verbose_router_logger.debug(
+                        "stream_with_fallbacks: partial usage extraction failed: %s",
+                        usage_exc,
+                    )
+                    partial_usage = None
                 try:
                     model_group = cast(str, initial_kwargs.get("model"))
                     fallbacks: Optional[List] = initial_kwargs.get("fallbacks", self.fallbacks)
