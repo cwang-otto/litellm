@@ -1,6 +1,6 @@
 [project]
 name = "litellm"
-version = "1.110.0"
+version = "1.110.0rc2+otto.1"
 description = "Library to easily interface with LLM API providers"
 readme = "README.md"
 requires-python = ">=3.10, <3.16"
