@@ -1,0 +1,38 @@
+name: otto-wheels
+
+# Builds the wheels Otto pins from this fork's releases: manylinux x86_64 for its images and CI,
+# macOS arm64 for local development. Run by hand on an otto/* branch.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheel:
+    strategy:
+      matrix:
+        include:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64
+            manylinux: "2_28"
+          - name: macos-arm64
+            runner: macos-14
+            target: aarch64
+            manylinux: ""
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          maturin-version: "1.15.0"
+          target: ${{ matrix.target }}
+          manylinux: ${{ matrix.manylinux }}
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.name }}
+          path: dist/*.whl
+          retention-days: 7
