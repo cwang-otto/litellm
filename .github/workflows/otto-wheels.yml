@@ -1,9 +1,10 @@
 name: otto-wheels
 
 # Builds the wheels Otto pins from this fork's releases: manylinux x86_64 for its images and CI,
-# macOS arm64 for local development. Run by hand on an otto/* branch.
+# macOS arm64 for local development. Runs on every push to an otto/* branch.
 on:
-  workflow_dispatch:
+  push:
+    branches: ["otto/**"]
 
 permissions:
   contents: read
